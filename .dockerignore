@@ -1,0 +1,9 @@
+__pycache__
+*.pyc
+.env
+(2).env
+*.db
+.git
+.gitignore
+README.md
+bot_max_bothost
