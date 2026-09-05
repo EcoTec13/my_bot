@@ -3,9 +3,11 @@ import json
 import logging
 import os
 import re
+import ssl
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 import aiohttp
+import certifi
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -37,10 +39,7 @@ from keyboards import (
     build_start_button,
 )
 import states
-import ssl
-import certifi
 
-ssl_context = ssl.create_default_context(cafile=certifi.where())
 logger = logging.getLogger(__name__)
 
 # Подписи статусов заявок (единственное место задания текстов).
@@ -94,8 +93,13 @@ async def max_api_request(method: str, path: str, **kwargs) -> Optional[Dict]:
     if "headers" in kwargs:
         headers.update(kwargs.pop("headers"))
     try:
+        # Исправление SSL-ошибки ("certificate verify failed"): используем
+        # корневые сертификаты из certifi вместо системного хранилища.
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
         async with aiohttp.ClientSession() as session:
-            async with session.request(method, url, headers=headers, **kwargs) as resp:
+            async with session.request(
+                method, url, headers=headers, ssl=ssl_context, **kwargs
+            ) as resp:
                 if resp.status == 401:
                     logger.error("Ошибка авторизации: неверный токен")
                     return None
@@ -573,31 +577,7 @@ async def handle_callback(user_id: int, payload: Dict) -> None:
         if user_id not in ADMIN_IDS:
             await send_message(user_id, "❌ У вас нет доступа.")
             return
-        if not os.path.exists(SCHEDULE_FILE_PATH):
-            await send_message(
-                user_id,
-                f"❌ Файл графика не найден: {SCHEDULE_FILE_PATH}\n"
-                "Положите .xlsx рядом с ботом или задайте SCHEDULE_FILE_PATH.",
-            )
-            return
-        try:
-            from handlers.admin.schedule import import_schedule_from_excel
-
-            report = await import_schedule_from_excel(SCHEDULE_FILE_PATH)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Ошибка импорта графика: %s", exc)
-            await send_message(user_id, f"❌ Ошибка импорта графика: {exc}")
-            return
-        text = (
-            "✅ График загружен!\n"
-            f"Мастеров в БД: {report['masters']}\n"
-            f"Дат в файле: {report['dates']}\n"
-            f"Рабочих дней (X): {report['working_days']}\n"
-            f"Строк вставлено: {report['inserted']}"
-        )
-        if report.get("skipped_masters"):
-            text += "\n⚠️ Не найдены в БД: " + ", ".join(report["skipped_masters"])
-        await send_message(user_id, text)
+        await upload_schedule(user_id)
         return
     if cmd == "admin_services":
         await show_admin_services(user_id)
@@ -1246,6 +1226,50 @@ async def show_admin_panel(user_id: int) -> None:
     clear_admin_ctx(user_id)
     keyboard = build_admin_menu()
     await send_message_with_keyboard(user_id, "🛠 Админ-панель", keyboard)
+
+
+async def upload_schedule(user_id: int, file_path: Optional[str] = None) -> None:
+    """Загружает график работы мастеров из Excel-файла (.xlsx).
+
+    По умолчанию используется SCHEDULE_FILE_PATH из конфига. Чтение и запись
+    в БД выполняет handlers.admin.schedule.import_schedule_from_excel
+    (на базе openpyxl); здесь — проверки, импорт библиотеки и обработка ошибок.
+    """
+    file_path = file_path or SCHEDULE_FILE_PATH
+    try:
+        import openpyxl  # noqa: F401 — нужна для чтения .xlsx
+    except ImportError:
+        await send_message(
+            user_id,
+            "❌ Библиотека openpyxl не установлена. Установите её: pip install openpyxl",
+        )
+        return
+    if not os.path.exists(file_path):
+        await send_message(
+            user_id,
+            f"❌ Файл графика не найден: {file_path}\n"
+            "Положите .xlsx рядом с ботом или задайте SCHEDULE_FILE_PATH.",
+        )
+        return
+    try:
+        from handlers.admin.schedule import import_schedule_from_excel
+
+        report = await import_schedule_from_excel(file_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Ошибка импорта графика: %s", exc)
+        await send_message(user_id, f"❌ Ошибка импорта графика: {exc}")
+        return
+    text = (
+        "✅ График загружен!\n"
+        f"Мастеров в БД: {report['masters']}\n"
+        f"Дат в файле: {report['dates']}\n"
+        f"Рабочих дней (X): {report['working_days']}\n"
+        f"Строк вставлено: {report['inserted']}"
+    )
+    if report.get("skipped_masters"):
+        text += "\n⚠️ Не найдены в БД: " + ", ".join(report["skipped_masters"])
+    await send_message(user_id, text)
+
 
 async def show_admin_services(user_id: int) -> None:
     async with async_session() as session:
