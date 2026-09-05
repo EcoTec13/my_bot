@@ -37,7 +37,10 @@ from keyboards import (
     build_start_button,
 )
 import states
+import ssl
+import certifi
 
+ssl_context = ssl.create_default_context(cafile=certifi.where())
 logger = logging.getLogger(__name__)
 
 # Подписи статусов заявок (единственное место задания текстов).
